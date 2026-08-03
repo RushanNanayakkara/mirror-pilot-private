@@ -1,0 +1,122 @@
+name: Sync upstream
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+permissions:
+  contents: write
+  pull-requests: write
+env:
+  UPSTREAM: RushanNanayakkara/mirror-pilot-public
+  UPSTREAM_BRANCH: main
+  PRIVATE_BRANCH: main
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          git config user.name  "sync-bot"
+          git config user.email "sync-bot@users.noreply.github.com"
+
+          git remote add upstream "https://github.com/$UPSTREAM.git"
+          git fetch -q upstream "$UPSTREAM_BRANCH"
+          git fetch -q --tags origin
+
+          # First run: start at the current public tip. History is not backfilled.
+          if ! git rev-parse -q --verify refs/tags/synced/scanned >/dev/null; then
+            git tag -f synced/scanned "upstream/$UPSTREAM_BRANCH"
+            git push -q -f origin synced/scanned
+            echo "initialised at the current public tip; nothing backfilled"
+            exit 0
+          fi
+          BASE=$(git rev-parse refs/tags/synced/scanned)
+
+          OPENED=0
+          for SHA in $(git log --reverse --first-parent --format=%H \
+                         "$BASE..upstream/$UPSTREAM_BRANCH"); do
+
+            # Ask GitHub which PR introduced this commit. Prefer the PR whose squash
+            # commit is exactly this SHA; fall back to the first association.
+            PULLS=$(gh api "/repos/$UPSTREAM/commits/$SHA/pulls")
+            PR=$(jq -c --arg sha "$SHA" \
+                   '(map(select(.merge_commit_sha == $sha)) + .) | .[0] // empty' <<<"$PULLS")
+
+            # Keep the public subject, minus the (#N) that would mis-link here.
+            SUBJECT=$(git log -1 --format=%s "$SHA" | sed -E 's/ *\(#[0-9]+\)$//')
+
+            if [ -n "$PR" ]; then
+              N=$(jq -r '.number'          <<<"$PR")
+              AUTHOR=$(jq -r '.user.login' <<<"$PR")
+              URL=$(jq -r '.html_url'      <<<"$PR")
+            else
+              N=$(git log -1 --format=%s "$SHA" | grep -oE '\(#[0-9]+\)$' | grep -oE '[0-9]+' || true)
+              AUTHOR=$(git log -1 --format=%an "$SHA")
+              URL="https://github.com/$UPSTREAM/commit/$SHA"
+              [ -n "$N" ] || N="direct-$(git log -1 --format=%h "$SHA")"
+            fi
+
+            # Idempotency. Survives a partial previous run.
+            if git rev-parse -q --verify "refs/tags/synced/pr-$N" >/dev/null; then
+              echo "already synced: PR $N"
+              continue
+            fi
+
+            # Cross-repo form. A bare #N would link to a private PR of that number.
+            TRAILERS=$(printf 'Upstream-PR: %s#%s\nUpstream-Commit: %s\nUpstream-Author: %s\nUpstream-URL: %s' \
+                         "$UPSTREAM" "$N" "$SHA" "$AUTHOR" "$URL")
+
+            BR="sync/pr-$N"
+            git checkout -q -B "$BR" "origin/$PRIVATE_BRANCH"
+
+            # Cherry-pick applies this commit only. Its ancestors are not brought in.
+            printf '%s\n\n%s\n' "$SUBJECT" "$TRAILERS" > /tmp/msg
+            if git cherry-pick -n "$SHA"; then
+              git commit -q -F /tmp/msg
+              LABEL=""
+            else
+              # Read --diff-filter=U BEFORE git add -A, or the list comes out empty.
+              printf '%s (UNRESOLVED CONFLICTS)\n\n%s\n\nConflicted-Files:\n%s\n' \
+                "$SUBJECT" "$TRAILERS" \
+                "$(git diff --name-only --diff-filter=U | sed 's/^/  /')" > /tmp/msg
+              git add -A
+              git commit -q -F /tmp/msg
+              git cherry-pick --quit 2>/dev/null || true
+              LABEL="--label conflict"
+            fi
+
+            git push -qf origin "$BR"
+
+            if gh pr create --base "$PRIVATE_BRANCH" --head "$BR" $LABEL \
+                 --title "Sync upstream PR $N: $SUBJECT" \
+                 --body "$(printf 'Mirrors %s#%s from the public repository.\n\nUpstream commit: `%s`\n%s\n' \
+                             "$UPSTREAM" "$N" "$SHA" "$URL")"; then
+              gh pr merge "$BR" --auto --merge || echo "could not enable auto-merge on $BR"
+              OPENED=$((OPENED+1))
+            else
+              echo "PR already exists for $BR"
+            fi
+
+            git tag -f "synced/pr-$N" "$SHA"
+            git push -q -f origin "synced/pr-$N"
+          done
+
+          # Only reached if every commit in the window processed without error.
+          git tag -f synced/scanned "upstream/$UPSTREAM_BRANCH"
+          git push -q -f origin synced/scanned
+          echo "opened $OPENED sync PR(s)"
+
+      - name: Notify on failure
+        if: failure()
+        env:
+          GCHAT_WEBHOOK: ${{ secrets.GCHAT_WEBHOOK_OPS }}
+        run: |
+          [ -n "${GCHAT_WEBHOOK:-}" ] || { echo "no webhook configured"; exit 0; }
+          MSG="Sync workflow failed: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          curl -sS -X POST -H 'Content-Type: application/json' \
+            -d "$(jq -n --arg t "$MSG" '{text:$t}')" "$GCHAT_WEBHOOK" >/dev/null

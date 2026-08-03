@@ -1,0 +1,66 @@
+name: Hotfix overlap
+on: pull_request
+permissions:
+  contents: read
+  pull-requests: write
+jobs:
+  hotfix-overlap:
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GCHAT_WEBHOOK: ${{ secrets.GCHAT_WEBHOOK_DEV }}
+          PR: ${{ github.event.pull_request.number }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          REPO: ${{ github.repository }}
+          SERVER: ${{ github.server_url }}
+        run: |
+          set -euo pipefail
+
+          case "$HEAD_REF" in
+            sync/pr-*) ;;
+            *) echo "not a sync PR - nothing to check"; exit 0 ;;
+          esac
+
+          gh api "/repos/$REPO/pulls/$PR/files" --paginate --jq '.[].filename' \
+            | sort -u > /tmp/sync_files
+          echo "sync PR files:"; cat /tmp/sync_files
+
+          : > /tmp/hotfix_files
+          for n in $(gh pr list --state merged --label pending-public-fix \
+                       --limit 200 --json number -q '.[].number'); do
+            gh api "/repos/$REPO/pulls/$n/files" --paginate \
+              --jq ".[] | \"\(.filename)\t$n\"" >> /tmp/hotfix_files
+          done
+          sort -u -o /tmp/hotfix_files /tmp/hotfix_files
+          echo "hotfix files:"; cat /tmp/hotfix_files
+
+          # Whole-file match.
+          awk -F'\t' 'NR==FNR{h[$1]=h[$1]" #"$2; next} $1 in h {print $1 "\t" h[$1]}' \
+            /tmp/hotfix_files /tmp/sync_files > /tmp/hits
+
+          if [ ! -s /tmp/hits ]; then
+            echo "no overlap with hotfixes still labelled pending-public-fix"
+            exit 0
+          fi
+
+          TABLE=$(awk -F'\t' '{printf "| `%s` |%s |\n", $1, $2}' /tmp/hits)
+          gh pr comment "$PR" --body "$(printf 'This sync PR changes files that are also changed by hotfixes still labelled `pending-public-fix`.\n\nDo not merge until you have confirmed the public version replaces the hotfix. Then remove the label from the hotfix PR and close the hotfix issue.\n\n| File | Hotfix PR |\n|---|---|\n%s\n' "$TABLE")"
+
+          gh pr edit "$PR" --add-label needs-hotfix-review
+
+          for n in $(grep -oE '#[0-9]+' /tmp/hits | tr -d '#' | sort -u); do
+            a=$(gh pr view "$n" --json author -q '.author.login' 2>/dev/null || true)
+            [ -n "$a" ] && gh pr edit "$PR" --add-assignee "$a" || true
+          done
+
+          if [ -n "${GCHAT_WEBHOOK:-}" ]; then
+            MSG=$(printf 'Sync PR #%s needs a hotfix review - overlapping hotfix PRs: %s\n%s/%s/pull/%s' \
+                    "$PR" "$(grep -oE '#[0-9]+' /tmp/hits | sort -u | tr '\n' ' ')" \
+                    "$SERVER" "$REPO" "$PR")
+            curl -sS -X POST -H 'Content-Type: application/json' \
+              -d "$(jq -n --arg t "$MSG" '{text:$t}')" "$GCHAT_WEBHOOK" >/dev/null
+          fi
+
+          echo "::error::overlap found - failing so auto-merge does not fire"
+          exit 1

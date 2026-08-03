@@ -1,0 +1,19 @@
+name: Conflict markers
+on: pull_request
+permissions:
+  contents: read
+jobs:
+  conflict-markers:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - run: |
+          set -euo pipefail
+          BASE="${{ github.event.pull_request.base.sha }}"
+          HEAD="${{ github.event.pull_request.head.sha }}"
+          if git diff "$BASE...$HEAD" | grep -nE '^\+(<{7} |>{7} |={7}$)'; then
+            echo "::error::conflict markers present - do not merge"
+            exit 1
+          fi
+          echo "no conflict markers"
