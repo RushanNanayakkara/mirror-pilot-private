@@ -18,19 +18,22 @@ jobs:
         with: { fetch-depth: 0 }
       - env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Pin every gh command to THIS repo. A remote named "upstream" would
+          # otherwise make gh treat the public repo as the base repository.
+          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
 
           git config user.name  "sync-bot"
           git config user.email "sync-bot@users.noreply.github.com"
 
-          git remote add upstream "https://github.com/$UPSTREAM.git"
-          git fetch -q upstream "$UPSTREAM_BRANCH"
+          git remote add public "https://github.com/$UPSTREAM.git"
+          git fetch -q public "$UPSTREAM_BRANCH"
           git fetch -q --tags origin
 
           # First run: start at the current public tip. History is not backfilled.
           if ! git rev-parse -q --verify refs/tags/synced/scanned >/dev/null; then
-            git tag -f synced/scanned "upstream/$UPSTREAM_BRANCH"
+            git tag -f synced/scanned "public/$UPSTREAM_BRANCH"
             git push -q -f origin synced/scanned
             echo "initialised at the current public tip; nothing backfilled"
             exit 0
@@ -39,7 +42,7 @@ jobs:
 
           OPENED=0
           for SHA in $(git log --reverse --first-parent --format=%H \
-                         "$BASE..upstream/$UPSTREAM_BRANCH"); do
+                         "$BASE..public/$UPSTREAM_BRANCH"); do
 
             # Ask GitHub which PR introduced this commit. Prefer the PR whose squash
             # commit is exactly this SHA; fall back to the first association.
@@ -113,7 +116,7 @@ jobs:
           done
 
           # Only reached if every commit in the window processed without error.
-          git tag -f synced/scanned "upstream/$UPSTREAM_BRANCH"
+          git tag -f synced/scanned "public/$UPSTREAM_BRANCH"
           git push -q -f origin synced/scanned
           echo "opened $OPENED sync PR(s)"
 

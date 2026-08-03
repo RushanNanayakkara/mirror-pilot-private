@@ -9,6 +9,7 @@ jobs:
     steps:
       - env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
           GCHAT_WEBHOOK: ${{ secrets.GCHAT_WEBHOOK_DEV }}
           PR: ${{ github.event.pull_request.number }}
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
