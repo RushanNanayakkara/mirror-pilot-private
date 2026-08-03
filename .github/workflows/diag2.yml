@@ -1,0 +1,22 @@
+name: Diag PAT
+on: workflow_dispatch
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          GH_TOKEN: ${{ secrets.SYNC_PAT }}
+          REPO: ${{ github.repository }}
+        run: |
+          set +e
+          echo "### identity"
+          gh api user --jq '.login' 2>&1 | tail -1
+          echo "### repo permissions as seen by the PAT"
+          gh api "repos/$REPO" --jq '.permissions' 2>&1 | tail -1
+          echo "### can it read pulls?"
+          gh api "repos/$REPO/pulls?state=all&per_page=1" --jq 'length' 2>&1 | tail -1
+          echo "### can it write contents? (create then delete a probe ref)"
+          SHA=$(gh api "repos/$REPO/commits/main" --jq '.sha')
+          gh api -X POST "repos/$REPO/git/refs" -f ref=refs/heads/pat-probe -f sha="$SHA" \
+            --jq '.ref' 2>&1 | tail -1
+          gh api -X DELETE "repos/$REPO/git/refs/heads/pat-probe" >/dev/null 2>&1 && echo "probe ref cleaned up"
