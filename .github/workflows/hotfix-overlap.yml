@@ -28,8 +28,11 @@ jobs:
           echo "sync PR files:"; cat /tmp/sync_files
 
           : > /tmp/hotfix_files
-          for n in $(gh pr list --state merged --label pending-public-fix \
-                       --limit 200 --json number -q '.[].number'); do
+          # The issues API filters by label from the database. Do NOT use
+          # "gh pr list --label": that goes through the search index, which lags
+          # behind label changes by minutes and keeps blocking after a fix.
+          for n in $(gh api "/repos/$REPO/issues?labels=pending-public-fix&state=all&per_page=100" \
+                       --paginate --jq '.[] | select(.pull_request != null and .pull_request.merged_at != null) | .number'); do
             gh api "/repos/$REPO/pulls/$n/files" --paginate \
               --jq ".[] | \"\(.filename)\t$n\"" >> /tmp/hotfix_files
           done
