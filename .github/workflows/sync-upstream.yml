@@ -92,16 +92,22 @@ jobs:
 
             git push -qf origin "$BR"
 
-            if gh pr create --base "$PRIVATE_BRANCH" --head "$BR" $LABEL \
-                 --title "Sync upstream PR $N: $SUBJECT" \
-                 --body "$(printf 'Mirrors %s#%s from the public repository.\n\nUpstream commit: `%s`\n%s\n' \
-                             "$UPSTREAM" "$N" "$SHA" "$URL")"; then
+            # Distinguish "already open" from a real failure. A real failure must abort,
+            # so neither the per-PR tag nor synced/scanned advances past this commit.
+            EXISTING=$(gh pr list --head "$BR" --state open --json number -q '.[0].number // empty')
+            if [ -n "$EXISTING" ]; then
+              echo "PR already open for $BR (#$EXISTING)"
+            else
+              gh pr create --base "$PRIVATE_BRANCH" --head "$BR" $LABEL \
+                --title "Sync upstream PR $N: $SUBJECT" \
+                --body "$(printf 'Mirrors %s#%s from the public repository.\n\nUpstream commit: `%s`\n%s\n' \
+                            "$UPSTREAM" "$N" "$SHA" "$URL")" \
+                || { echo "::error::could not create a PR for $BR"; exit 1; }
               gh pr merge "$BR" --auto --merge || echo "could not enable auto-merge on $BR"
               OPENED=$((OPENED+1))
-            else
-              echo "PR already exists for $BR"
             fi
 
+            # Only tagged once a PR demonstrably exists.
             git tag -f "synced/pr-$N" "$SHA"
             git push -q -f origin "synced/pr-$N"
           done
