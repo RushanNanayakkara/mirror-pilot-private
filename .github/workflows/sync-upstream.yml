@@ -15,9 +15,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with: { fetch-depth: 0 }
+        with:
+          fetch-depth: 0
+          # A PAT, not GITHUB_TOKEN. A PR authored by github-actions[bot] has its
+          # required checks held as action_required until a human approves them,
+          # so auto-merge would never fire on its own.
+          token: ${{ secrets.SYNC_PAT }}
       - env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.SYNC_PAT }}
           # Pin every gh command to THIS repo. A remote named "upstream" would
           # otherwise make gh treat the public repo as the base repository.
           GH_REPO: ${{ github.repository }}
