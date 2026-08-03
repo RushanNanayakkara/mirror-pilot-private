@@ -33,6 +33,11 @@ jobs:
           # behind label changes by minutes and keeps blocking after a fix.
           for n in $(gh api "/repos/$REPO/issues?labels=pending-public-fix&state=all&per_page=100" \
                        --paginate --jq '.[] | select(.pull_request != null and .pull_request.merged_at != null) | .number'); do
+            # Re-verify. The label filter above is served from an index that stays
+            # stale for a long time after a label is removed, so a removed label
+            # would otherwise keep blocking this sync PR indefinitely.
+            gh api "/repos/$REPO/issues/$n/labels" --jq '.[].name' \
+              | grep -qx 'pending-public-fix' || { echo "skip #$n: label already removed"; continue; }
             gh api "/repos/$REPO/pulls/$n/files" --paginate \
               --jq ".[] | \"\(.filename)\t$n\"" >> /tmp/hotfix_files
           done
