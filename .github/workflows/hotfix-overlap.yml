@@ -1,5 +1,9 @@
 name: Hotfix overlap
-on: pull_request
+on:
+  pull_request:
+  # An approval re-triggers this check, which is how a human clears an overlap.
+  pull_request_review:
+    types: [submitted]
 permissions:
   contents: read
   pull-requests: write
@@ -22,6 +26,19 @@ jobs:
             sync/pr-*) ;;
             *) echo "not a sync PR - nothing to check"; exit 0 ;;
           esac
+
+          # A human approval on the CURRENT head clears the overlap gate. This is the
+          # only escape hatch: without it, one open hotfix blocks every unrelated public
+          # change to the same file until that hotfix is reconciled.
+          # Comparing commit_id to the head SHA means a stale approval does not count,
+          # whether or not "dismiss stale approvals" is enabled.
+          HEAD_SHA=$(gh api "/repos/$REPO/pulls/$PR" --jq '.head.sha')
+          APPROVALS=$(gh api "/repos/$REPO/pulls/$PR/reviews" --paginate \
+            --jq "[.[] | select(.state == \"APPROVED\" and .commit_id == \"$HEAD_SHA\")] | length")
+          if [ "${APPROVALS:-0}" != "0" ]; then
+            echo "overlap acknowledged: PR approved on the current head ($HEAD_SHA)"
+            exit 0
+          fi
 
           gh api "/repos/$REPO/pulls/$PR/files" --paginate --jq '.[].filename' \
             | sort -u > /tmp/sync_files
