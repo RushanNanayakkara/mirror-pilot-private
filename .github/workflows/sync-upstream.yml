@@ -17,12 +17,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          # A PAT, not GITHUB_TOKEN. A PR authored by github-actions[bot] has its
-          # required checks held as action_required until a human approves them,
-          # so auto-merge would never fire on its own.
-          token: ${{ secrets.SYNC_PAT }}
+          # Production uses a GitHub App installation token, whose events DO trigger
+          # workflows. GITHUB_TOKEN is used here only so the sync PR is authored by a
+          # bot and can therefore be approved by a person - you cannot approve your own PR.
+          token: ${{ secrets.GITHUB_TOKEN }}
       - env:
-          GH_TOKEN: ${{ secrets.SYNC_PAT }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Pin every gh command to THIS repo. A remote named "upstream" would
           # otherwise make gh treat the public repo as the base repository.
           GH_REPO: ${{ github.repository }}
