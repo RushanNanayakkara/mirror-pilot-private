@@ -7,8 +7,16 @@ on:
 permissions:
   contents: read
   pull-requests: write
+  statuses: write
 jobs:
-  hotfix-overlap:
+  # Deliberately NOT named "hotfix-overlap". The required check of that name is a
+  # COMMIT STATUS this job posts, not this job's own check run.
+  #
+  # Why: a pull_request_review run creates a SECOND check run rather than replacing
+  # the pull_request one, so two runs share the name and branch protection honours
+  # the failing one. Commit statuses are last-write-wins per context, so a later
+  # success genuinely overwrites an earlier failure.
+  overlap-gate:
     runs-on: ubuntu-latest
     steps:
       - env:
@@ -17,14 +25,23 @@ jobs:
           GCHAT_WEBHOOK: ${{ secrets.GCHAT_WEBHOOK_DEV }}
           PR: ${{ github.event.pull_request.number }}
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           REPO: ${{ github.repository }}
           SERVER: ${{ github.server_url }}
         run: |
           set -euo pipefail
 
+          # Every PR must get this status, or the required check never reports and the
+          # PR stays blocked forever.
+          post() {
+            gh api -X POST "/repos/$REPO/statuses/$HEAD_SHA" \
+              -f state="$1" -f context=hotfix-overlap -f description="$2" >/dev/null
+            echo "status: $1 - $2"
+          }
+
           case "$HEAD_REF" in
             sync/pr-*) ;;
-            *) echo "not a sync PR - nothing to check"; exit 0 ;;
+            *) post success "not a sync PR"; exit 0 ;;
           esac
 
           # A human approval on the CURRENT head clears the overlap gate. This is the
@@ -32,11 +49,10 @@ jobs:
           # change to the same file until that hotfix is reconciled.
           # Comparing commit_id to the head SHA means a stale approval does not count,
           # whether or not "dismiss stale approvals" is enabled.
-          HEAD_SHA=$(gh api "/repos/$REPO/pulls/$PR" --jq '.head.sha')
           APPROVALS=$(gh api "/repos/$REPO/pulls/$PR/reviews" --paginate \
             --jq "[.[] | select(.state == \"APPROVED\" and .commit_id == \"$HEAD_SHA\")] | length")
           if [ "${APPROVALS:-0}" != "0" ]; then
-            echo "overlap acknowledged: PR approved on the current head ($HEAD_SHA)"
+            post success "overlap acknowledged by an approval"
             exit 0
           fi
 
@@ -66,12 +82,12 @@ jobs:
             /tmp/hotfix_files /tmp/sync_files > /tmp/hits
 
           if [ ! -s /tmp/hits ]; then
-            echo "no overlap with hotfixes still labelled pending-public-fix"
+            post success "no overlap with an open hotfix"
             exit 0
           fi
 
           TABLE=$(awk -F'\t' '{printf "| `%s` |%s |\n", $1, $2}' /tmp/hits)
-          gh pr comment "$PR" --body "$(printf 'This sync PR changes files that are also changed by hotfixes still labelled `pending-public-fix`.\n\nDo not merge until you have confirmed the public version replaces the hotfix. Then remove the label from the hotfix PR and close the hotfix issue.\n\n| File | Hotfix PR |\n|---|---|\n%s\n' "$TABLE")"
+          gh pr comment "$PR" --body "$(printf 'This sync PR changes files that are also changed by hotfixes still labelled `pending-public-fix`.\n\nCheck whether the two changes belong together. If the public version replaces the hotfix, reconcile to one copy, remove the label from the hotfix PR and close the hotfix issue. If they are unrelated, confirm they make sense side by side.\n\n**Approving this PR clears this check.**\n\n| File | Hotfix PR |\n|---|---|\n%s\n' "$TABLE")"
 
           gh pr edit "$PR" --add-label needs-hotfix-review
 
@@ -88,5 +104,5 @@ jobs:
               -d "$(jq -n --arg t "$MSG" '{text:$t}')" "$GCHAT_WEBHOOK" >/dev/null
           fi
 
-          echo "::error::overlap found - failing so auto-merge does not fire"
-          exit 1
+          # The status carries the verdict, so the job itself exits 0.
+          post failure "overlaps an open hotfix - approve to clear"
