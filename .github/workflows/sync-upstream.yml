@@ -26,6 +26,8 @@ jobs:
           # Pin every gh command to THIS repo. A remote named "upstream" would
           # otherwise make gh treat the public repo as the base repository.
           GH_REPO: ${{ github.repository }}
+          GCHAT_WEBHOOK_DEV: ${{ secrets.GCHAT_WEBHOOK_DEV }}
+          SERVER: ${{ github.server_url }}
         run: |
           set -euo pipefail
 
@@ -113,6 +115,21 @@ jobs:
                 || { echo "::error::could not create a PR for $BR"; exit 1; }
               gh pr merge "$BR" --auto --merge || echo "could not enable auto-merge on $BR"
               OPENED=$((OPENED+1))
+
+              # A conflict is owned by whoever merged the public change that caused it.
+              # Nothing else notifies here: the run itself succeeds, so the failure hook
+              # below never fires for a conflict.
+              if [ -n "$LABEL" ]; then
+                gh pr edit "$BR" --add-assignee "$AUTHOR" \
+                  || echo "could not assign $AUTHOR - probably not a collaborator here"
+                if [ -n "${GCHAT_WEBHOOK_DEV:-}" ]; then
+                  MSG=$(printf 'Sync PR for %s#%s could not be applied cleanly and needs %s to resolve it.\n%s/%s/pull/%s' \
+                          "$UPSTREAM" "$N" "$AUTHOR" "$SERVER" "$GH_REPO" \
+                          "$(gh pr view "$BR" --json number -q .number)")
+                  curl -sS -X POST -H 'Content-Type: application/json' \
+                    -d "$(jq -n --arg t "$MSG" '{text:$t}')" "$GCHAT_WEBHOOK_DEV" >/dev/null || true
+                fi
+              fi
             fi
 
             # Only tagged once a PR demonstrably exists.
